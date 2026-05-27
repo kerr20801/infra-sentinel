@@ -1,0 +1,60 @@
+# infra-sentinel configuration
+# Copy this file to config.yaml and fill in your values.
+# config.yaml is in .gitignore — never commit actual credentials.
+
+# ── Target nodes ──────────────────────────────────────────────────────────────
+
+nginx_nodes:
+  - name: "IDC MASTER"
+    host: "ubuntu@192.168.1.10"
+  - name: "IDC BACKUP"
+    host: "ubuntu@192.168.1.11"
+  - name: "DMZ MASTER"
+    host: "ubuntu@10.0.0.10"
+  # Add more nodes as needed
+
+es_hosts:
+  - name: "es01"
+    url: "https://192.168.1.20:9200"
+  - name: "es02"
+    url: "https://192.168.1.21:9200"
+es_user: "your_es_user"
+es_pass: "your_es_password"
+
+k8s_clusters:
+  - name: "Prod"
+    url: "https://192.168.1.30:6443"
+  # - name: "Staging"
+  #   url: "https://192.168.1.31:6443"
+
+# ── CVE settings ──────────────────────────────────────────────────────────────
+
+# Only alert on CVEs with CVSS score >= this value
+# 7.0 = HIGH and above | 9.0 = CRITICAL only | 0.0 = all
+min_cvss: 7.0
+
+# Optional: NVD API key removes rate limiting (free at https://nvd.nist.gov/developers/request-an-api-key)
+# Without key: 5 req/30s | With key: 50 req/30s
+# nvd_api_key: "your-nvd-api-key-here"
+
+# ── Notifications (configure at least one) ────────────────────────────────────
+
+notifications:
+  # Mattermost incoming webhook
+  mattermost:
+    webhook: "https://your-mattermost.example.com/hooks/YOUR_HOOK_TOKEN"
+
+  # Slack incoming webhook
+  # slack:
+  #   webhook: "https://hooks.slack.com/services/T000/B000/xxxx"
+
+  # Telegram bot
+  # telegram:
+  #   bot_token: "123456789:ABCdefGHI..."
+  #   chat_id: "-1001234567890"
+
+# ── Storage paths ─────────────────────────────────────────────────────────────
+
+# Track which CVEs have already been alerted (prevents duplicate notifications)
+seen_file: "~/.infra-sentinel/seen.json"
+log_file:  "~/.infra-sentinel/check.log"

@@ -115,7 +115,6 @@ def send_alerts(text: str, cfg: dict, dry_run: bool):
 
     if webhook := notif.get("slack", {}).get("webhook"):
         log("Sending Slack alert...")
-        # Slack uses 'text' field same as Mattermost
         _http_post_json(webhook, {"text": text})
         sent = True
 
@@ -124,7 +123,6 @@ def send_alerts(text: str, cfg: dict, dry_run: bool):
         chat_id = tg.get("chat_id")
         if token and chat_id:
             log("Sending Telegram alert...")
-            # Telegram max message length is 4096
             chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
             for chunk in chunks:
                 url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -144,21 +142,22 @@ def send_alerts(text: str, cfg: dict, dry_run: bool):
 NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 NVD_DELAY = 7  # seconds between requests (free tier: 5 req/30s)
 
+# CPE vendor/product mapping per service
+# Format: (vendor, product)
+# Reference: https://nvd.nist.gov/products/cpe/search
+CPE_MAP = {
+    "nginx":         ("nginx",          "nginx"),
+    "elasticsearch": ("elastic",        "elasticsearch"),
+    "kubernetes":    ("kubernetes",     "kubernetes"),
+}
 
-def query_nvd(keyword: str, api_key: str | None = None) -> list[dict]:
-    url = f"{NVD_API}?keywordSearch={urllib.request.quote(keyword)}&resultsPerPage=20"
-    headers = {}
-    if api_key:
-        headers["apiKey"] = api_key
 
-    data = _http_get(url, headers=headers)
-    if not data:
-        return []
-
+def _parse_nvd_response(response: dict) -> list[dict]:
+    """Parse raw NVD API response into a list of CVE dicts."""
     results = []
-    for item in data.get("vulnerabilities", []):
+    for item in response.get("vulnerabilities", []):
         cve = item.get("cve", {})
-        cve_id = cve.get("id", "")
+        cve_id    = cve.get("id", "")
         published = cve.get("published", "")[:10]
 
         metrics = cve.get("metrics", {})
@@ -166,7 +165,7 @@ def query_nvd(keyword: str, api_key: str | None = None) -> list[dict]:
         for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
             entries = metrics.get(key, [])
             if entries:
-                data_v = entries[0].get("cvssData", {})
+                data_v   = entries[0].get("cvssData", {})
                 score    = data_v.get("baseScore")
                 severity = data_v.get("baseSeverity") or entries[0].get("baseSeverity", "?")
                 break
@@ -186,6 +185,37 @@ def query_nvd(keyword: str, api_key: str | None = None) -> list[dict]:
 
     results.sort(key=lambda x: x["score"] or 0, reverse=True)
     return results
+
+
+def query_nvd_by_cpe(service: str, version: str, api_key: str | None = None) -> list[dict]:
+    """
+    Query NVD using CPE name for precise version matching.
+    Falls back to keyword search if CPE lookup returns no results.
+
+    CPE format: cpe:2.3:a:{vendor}:{product}:{version}:*:*:*:*:*:*:*
+    """
+    vendor, product = CPE_MAP.get(service, (service, service))
+    cpe_name = f"cpe:2.3:a:{vendor}:{product}:{version}:*:*:*:*:*:*:*"
+    url = f"{NVD_API}?cpeName={urllib.request.quote(cpe_name)}&resultsPerPage=20"
+
+    headers = {}
+    if api_key:
+        headers["apiKey"] = api_key
+
+    log(f"  CPE lookup: {cpe_name}")
+    response = _http_get(url, headers=headers)
+
+    if response and response.get("vulnerabilities"):
+        return _parse_nvd_response(response)
+
+    # Fallback: keyword search (less precise, more noise)
+    log(f"  CPE returned no results, falling back to keyword search: '{service} {version}'")
+    keyword = f"{service} {version}"
+    fallback_url = f"{NVD_API}?keywordSearch={urllib.request.quote(keyword)}&resultsPerPage=20"
+    fallback_response = _http_get(fallback_url, headers=headers)
+    if not fallback_response:
+        return []
+    return _parse_nvd_response(fallback_response)
 
 
 def filter_cves(cves: list[dict], seen: dict, min_cvss: float, force: bool) -> list[dict]:
@@ -258,9 +288,8 @@ def check_nginx_nodes(cfg: dict, seen: dict, min_cvss: float, force: bool) -> li
             )
 
         short_ver = installed.split("-")[0].split(":").pop()
-        keyword = f"nginx {short_ver}"
-        log(f"  Querying NVD for '{keyword}' (min CVSS {min_cvss})...")
-        cves = query_nvd(keyword, api_key=nvd_key)
+        log(f"  Querying NVD for nginx {short_ver} (min CVSS {min_cvss})...")
+        cves = query_nvd_by_cpe("nginx", short_ver, api_key=nvd_key)
         if not nvd_key:
             time.sleep(NVD_DELAY)
 
@@ -312,9 +341,8 @@ def check_es_cluster(cfg: dict, seen: dict, min_cvss: float, force: bool) -> lis
             continue
         checked.add(version)
 
-        keyword = f"elasticsearch {version}"
-        log(f"  Querying NVD for '{keyword}' (min CVSS {min_cvss})...")
-        cves = query_nvd(keyword, api_key=nvd_key)
+        log(f"  Querying NVD for elasticsearch {version} (min CVSS {min_cvss})...")
+        cves = query_nvd_by_cpe("elasticsearch", version, api_key=nvd_key)
         if not nvd_key:
             time.sleep(NVD_DELAY)
 
@@ -359,9 +387,8 @@ def check_k8s_clusters(cfg: dict, seen: dict, min_cvss: float, force: bool) -> l
             continue
         checked.add(version)
 
-        keyword = f"kubernetes {version}"
-        log(f"  Querying NVD for '{keyword}' (min CVSS {min_cvss})...")
-        cves = query_nvd(keyword, api_key=nvd_key)
+        log(f"  Querying NVD for kubernetes {version} (min CVSS {min_cvss})...")
+        cves = query_nvd_by_cpe("kubernetes", version, api_key=nvd_key)
         if not nvd_key:
             time.sleep(NVD_DELAY)
 
@@ -412,8 +439,7 @@ def main():
     log("--- Kubernetes clusters ---")
     all_alerts += check_k8s_clusters(cfg, seen, min_cvss, args.force)
 
-    if not args.force:
-        save_seen(seen, seen_path)
+    save_seen(seen, seen_path)
 
     if all_alerts:
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
